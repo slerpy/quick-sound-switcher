@@ -34,6 +34,7 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
         super._init({reactive: false});
         this._stream = stream;
         this._ = gettext;
+        this._destroyed = false;
 
         let box = new St.BoxLayout({
             vertical: true,
@@ -62,6 +63,7 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
                 gicon,
                 style_class: 'popup-menu-icon',
             });
+            this._hasRealIcon = true;
         } else {
             let iconName = stream.get_icon_name();
             if (!iconName || iconName === '')
@@ -70,6 +72,7 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
                 icon_name: iconName,
                 style_class: 'popup-menu-icon',
             });
+            this._hasRealIcon = false;
         }
         headerBox.add_child(this._icon);
 
@@ -97,6 +100,65 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
         this._streamChangedId = this._stream.connect('notify::volume', () => {
             this._updateSlider();
         });
+
+        // Some apps (Discord's WebRTC engine among them) report an internal
+        // component name instead of the app itself, and not every app sets
+        // application.id for the DesktopAppInfo lookup above. Fall back to
+        // application.process.binary, which more reliably reflects the
+        // actual executable, once it's available.
+        this._resolveFallbackInfo(stream.get_index(), label);
+    }
+
+    async _resolveFallbackInfo(sinkInputIndex, originalLabel) {
+        let info = await Port.getSinkInputInfo();
+        if (this._destroyed)
+            return;
+        let entry = info[String(sinkInputIndex)];
+        if (!entry || !entry.binary)
+            return;
+        let binary = entry.binary;
+
+        // Icon: only try this if the DesktopAppInfo lookup via application.id
+        // already failed and we're still showing the generic fallback icon.
+        if (!this._hasRealIcon) {
+            try {
+                let appInfo = Gio.DesktopAppInfo.new(`${binary.toLowerCase()}.desktop`);
+                if (appInfo) {
+                    let gicon = appInfo.get_icon();
+                    if (gicon) {
+                        this._icon.gicon = gicon;
+                        this._hasRealIcon = true;
+                    }
+                }
+            } catch (e) {
+                // No matching .desktop file for this binary name either —
+                // keep the generic fallback icon already showing.
+            }
+        }
+
+        // Label: only override when the stream's self-reported name looks
+        // like an internal component rather than the app itself.
+        if (originalLabel.toLowerCase().includes('webrtc')) {
+            let niceName = binary.charAt(0).toUpperCase() + binary.slice(1);
+            this._label.text = niceName;
+            this._slider.accessible_name = niceName;
+        }
+
+        // Firefox tab title: only Firefox reliably exposes this, and only
+        // via PipeWire's native graph (pactl's view is unreliable/stale for
+        // this specific field), so this is a separate, targeted lookup.
+        if (binary.toLowerCase() === 'firefox' && entry.processId) {
+            let titles = await Port.getFirefoxLiveTitles();
+            if (this._destroyed)
+                return;
+            let title = titles[String(entry.processId)];
+            if (title) {
+                if (title.length > 50)
+                    title = `${title.slice(0, 49)}…`;
+                this._label.text = title;
+                this._slider.accessible_name = title;
+            }
+        }
     }
 
     _getMaxVolume() {
@@ -111,6 +173,7 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
     }
 
     destroy() {
+        this._destroyed = true;
         if (this._sliderChangedId) {
             this._slider.disconnect(this._sliderChangedId);
             this._sliderChangedId = null;

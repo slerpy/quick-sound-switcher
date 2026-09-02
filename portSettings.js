@@ -185,6 +185,87 @@ export async function getSinks() {
     }
 }
 
+// Looks up application.process.binary and application.process.id for
+// every current sink-input, keyed by sink-input index (the same index
+// Gvc.MixerStream.get_index() returns).
+//
+// process.binary is used as a fallback identity source — more reliable
+// than a stream's own self-reported name/icon, since some apps (Discord's
+// WebRTC engine, for example) report an internal component name instead
+// of the app itself, while process.binary consistently reflects the
+// actual executable.
+//
+// process.id (the PID) is captured so callers can cross-reference against
+// getFirefoxLiveTitles() below — pw-dump uses PipeWire's own object IDs,
+// which are a different numbering scheme than pactl's sink-input index,
+// so PID is the safe, stable join key between the two data sources.
+export async function getSinkInputInfo() {
+    try {
+        let stdout = await _spawnAsync(['pactl', 'list', 'sink-inputs']);
+        let blocks = stdout.split(/^Sink Input #/m).slice(1);
+        let info = {};
+        for (let block of blocks) {
+            let idMatch = /^(\d+)/.exec(block);
+            if (!idMatch)
+                continue;
+            let binMatch = /\n\t\tapplication\.process\.binary = "(.*?)"/.exec(block);
+            let pidMatch = /\n\t\tapplication\.process\.id = "(.*?)"/.exec(block);
+            info[idMatch[1]] = {
+                binary: binMatch ? binMatch[1] : undefined,
+                processId: pidMatch ? pidMatch[1] : undefined,
+            };
+        }
+        return info;
+    } catch (e) {
+        _log(`ERROR getting sink-input info: ${e}`);
+        return {};
+    }
+}
+
+// Returns live Firefox tab/media titles, keyed by PID, sourced from
+// pw-dump (PipeWire's native graph) rather than pactl.
+//
+// This exists specifically because Firefox's title only shows up
+// correctly via PipeWire's native media.name property on the currently
+// *running* stream node — pactl's PulseAudio-compat view either omits it
+// or shows a stale/generic value, and idle leftover nodes from closed or
+// paused tabs can carry stale titles too, so only "running" nodes are
+// trusted here.
+//
+// Chromium and Electron apps hardcode a generic media.name regardless of
+// tab/content (confirmed directly against this system's own pw-dump
+// output), so this is intentionally Firefox-only — there's nothing
+// meaningful to extract for other browsers.
+export async function getFirefoxLiveTitles() {
+    try {
+        let stdout = await _spawnAsync(['pw-dump']);
+        let objects = JSON.parse(stdout);
+        let titles = {};
+        for (let obj of objects) {
+            if (obj.type !== 'PipeWire:Interface:Node')
+                continue;
+            let nodeInfo = obj.info;
+            let props = nodeInfo ? nodeInfo.props : null;
+            if (!props)
+                continue;
+            if (props['application.process.binary'] !== 'firefox')
+                continue;
+            if (props['media.class'] !== 'Stream/Output/Audio')
+                continue;
+            if (nodeInfo.state !== 'running')
+                continue;
+            let pid = props['application.process.id'];
+            let title = props['media.name'];
+            if (pid && title)
+                titles[String(pid)] = title;
+        }
+        return titles;
+    } catch (e) {
+        _log(`ERROR getting pw-dump firefox titles: ${e}`);
+        return {};
+    }
+}
+
 export function refreshCards(extensionDir, settings) {
     if (extensionDir)
         _ctx.extensionDir = extensionDir;
