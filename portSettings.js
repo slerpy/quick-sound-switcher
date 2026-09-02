@@ -185,20 +185,14 @@ export async function getSinks() {
     }
 }
 
-// Looks up application.process.binary and application.process.id for
-// every current sink-input, keyed by sink-input index (the same index
-// Gvc.MixerStream.get_index() returns).
+// Looks up application.process.binary for every current sink-input, keyed
+// by sink-input index (the same index Gvc.MixerStream.get_index() and
+// pw-dump's object.serial both use — see getFirefoxLiveTitles() below).
 //
-// process.binary is used as a fallback identity source — more reliable
-// than a stream's own self-reported name/icon, since some apps (Discord's
-// WebRTC engine, for example) report an internal component name instead
-// of the app itself, while process.binary consistently reflects the
-// actual executable.
-//
-// process.id (the PID) is captured so callers can cross-reference against
-// getFirefoxLiveTitles() below — pw-dump uses PipeWire's own object IDs,
-// which are a different numbering scheme than pactl's sink-input index,
-// so PID is the safe, stable join key between the two data sources.
+// Used as a more reliable identity source than a stream's own
+// self-reported name/icon — some apps (Discord's WebRTC engine, for
+// example) report an internal component name instead of the app itself,
+// while process.binary consistently reflects the actual executable.
 export async function getSinkInputInfo() {
     try {
         let stdout = await _spawnAsync(['pactl', 'list', 'sink-inputs']);
@@ -209,10 +203,8 @@ export async function getSinkInputInfo() {
             if (!idMatch)
                 continue;
             let binMatch = /\n\t\tapplication\.process\.binary = "(.*?)"/.exec(block);
-            let pidMatch = /\n\t\tapplication\.process\.id = "(.*?)"/.exec(block);
             info[idMatch[1]] = {
                 binary: binMatch ? binMatch[1] : undefined,
-                processId: pidMatch ? pidMatch[1] : undefined,
             };
         }
         return info;
@@ -222,8 +214,10 @@ export async function getSinkInputInfo() {
     }
 }
 
-// Returns live Firefox tab/media titles, keyed by PID, sourced from
-// pw-dump (PipeWire's native graph) rather than pactl.
+// Returns live Firefox tab/media titles, keyed by object.serial — which
+// is confirmed identical to pactl's "Sink Input #N" index (and therefore
+// to Gvc.MixerStream.get_index()) — sourced from pw-dump (PipeWire's
+// native graph) rather than pactl.
 //
 // This exists specifically because Firefox's title only shows up
 // correctly via PipeWire's native media.name property on the currently
@@ -236,6 +230,13 @@ export async function getSinkInputInfo() {
 // tab/content (confirmed directly against this system's own pw-dump
 // output), so this is intentionally Firefox-only — there's nothing
 // meaningful to extract for other browsers.
+//
+// object.serial (not application.process.id) is the join key: Firefox's
+// tabs don't each get their own PID — all of a profile's tabs share one
+// parent process — so PID alone can't tell simultaneous tabs apart.
+// object.serial is per-stream, confirmed to exactly match pactl's Sink
+// Input index, so every tab resolves to its own exact title regardless
+// of how many are playing at once.
 export async function getFirefoxLiveTitles() {
     try {
         let stdout = await _spawnAsync(['pw-dump']);
@@ -254,10 +255,11 @@ export async function getFirefoxLiveTitles() {
                 continue;
             if (nodeInfo.state !== 'running')
                 continue;
-            let pid = props['application.process.id'];
+            let serial = props['object.serial'];
             let title = props['media.name'];
-            if (pid && title)
-                titles[String(pid)] = title;
+            if (serial === undefined || !title)
+                continue;
+            titles[String(serial)] = title;
         }
         return titles;
     } catch (e) {

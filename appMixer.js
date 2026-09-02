@@ -147,11 +147,14 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
         // Firefox tab title: only Firefox reliably exposes this, and only
         // via PipeWire's native graph (pactl's view is unreliable/stale for
         // this specific field), so this is a separate, targeted lookup.
-        if (binary.toLowerCase() === 'firefox' && entry.processId) {
+        // Joined via sinkInputIndex, which is confirmed identical to
+        // pw-dump's object.serial — precise per-stream, so this correctly
+        // distinguishes any number of simultaneous tabs, not just one.
+        if (binary.toLowerCase() === 'firefox') {
             let titles = await Port.getFirefoxLiveTitles();
             if (this._destroyed)
                 return;
-            let title = titles[String(entry.processId)];
+            let title = titles[String(sinkInputIndex)];
             if (title) {
                 if (title.length > 50)
                     title = `${title.slice(0, 49)}…`;
@@ -209,7 +212,7 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
             for (let sink of sinks) {
                 if (sink.name === undefined)
                     continue;
-                let sinkLabel = `${sink.id} - ${sink.name}`;
+                let sinkLabel = sink.name;
                 this.menu.addAction(sinkLabel, () => this._moveSinkInput(sink));
             }
         }).catch(e => {
