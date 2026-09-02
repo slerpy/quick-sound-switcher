@@ -237,6 +237,11 @@ export async function getSinkInputInfo() {
 // object.serial is per-stream, confirmed to exactly match pactl's Sink
 // Input index, so every tab resolves to its own exact title regardless
 // of how many are playing at once.
+// Generic placeholder values Firefox/cubeb falls back to when it hasn't
+// (or can't) determine a real tab/media title — these should never be
+// shown as if they were an actual title.
+const GENERIC_MEDIA_NAMES = new Set(['audiostream', 'audio stream', 'playback']);
+
 export async function getFirefoxLiveTitles() {
     try {
         let stdout = await _spawnAsync(['pw-dump']);
@@ -258,6 +263,8 @@ export async function getFirefoxLiveTitles() {
             let serial = props['object.serial'];
             let title = props['media.name'];
             if (serial === undefined || !title)
+                continue;
+            if (GENERIC_MEDIA_NAMES.has(title.trim().toLowerCase()))
                 continue;
             titles[String(serial)] = title;
         }
