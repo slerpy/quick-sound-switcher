@@ -173,7 +173,7 @@ export function getPorts(refresh) {
 export async function getSinks() {
     try {
         let stdout = await _spawnAsync(['pactl', 'list', 'sinks']);
-        const re = /Sink #(\d+)\n(?:.|\n)*?device\.description = "(.*?)"(?:.|\n)*?/g;
+        const re = /Sink #(\d+)\n\s*Description:\s(.*)/g;
         let m;
         let sinks = [];
         while ((m = re.exec(stdout)) !== null)
