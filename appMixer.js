@@ -43,7 +43,7 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
         this.add_child(box);
 
         // Header: icon + name + mute button
-        let headerBox = new St.BoxLayout({x_expand: true});
+        let headerBox = new St.BoxLayout({x_expand: true, style: 'spacing: 8px;'});
         box.add_child(headerBox);
 
         let gicon = null;
@@ -155,12 +155,13 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
             if (this._destroyed)
                 return;
             let title = titles[String(sinkInputIndex)];
-            if (title) {
-                if (title.length > 50)
-                    title = `${title.slice(0, 49)}…`;
-                this._label.text = title;
-                this._slider.accessible_name = title;
-            }
+            if (title && title.length > 50)
+                title = `${title.slice(0, 49)}…`;
+            // Fall back to a clean app name rather than leaving whatever
+            // generic text (e.g. "AudioStream") the stream self-reported.
+            let finalLabel = title || 'Firefox';
+            this._label.text = finalLabel;
+            this._slider.accessible_name = finalLabel;
         }
     }
 
