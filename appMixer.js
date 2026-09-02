@@ -45,20 +45,35 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
         let headerBox = new St.BoxLayout({x_expand: true});
         box.add_child(headerBox);
 
-        let iconName = stream.get_icon_name();
-        if (!iconName || iconName === '')
-            iconName = 'application-x-executable-symbolic';
-        this._icon = new St.Icon({
-            icon_name: iconName,
-            style_class: 'popup-menu-icon',
-        });
+        let gicon = null;
+        let appId = stream.get_application_id();
+        if (appId) {
+            try {
+                let appInfo = Gio.DesktopAppInfo.new(appId);
+                if (appInfo)
+                    gicon = appInfo.get_icon();
+            } catch (e) {
+                // No matching .desktop file for this app id — fall through
+                // to the generic icon-name fallback below.
+            }
+        }
+        if (gicon) {
+            this._icon = new St.Icon({
+                gicon,
+                style_class: 'popup-menu-icon',
+            });
+        } else {
+            let iconName = stream.get_icon_name();
+            if (!iconName || iconName === '')
+                iconName = 'application-x-executable-symbolic';
+            this._icon = new St.Icon({
+                icon_name: iconName,
+                style_class: 'popup-menu-icon',
+            });
+        }
         headerBox.add_child(this._icon);
 
-        let name = stream.get_name() || stream.get_description() || 'Unknown';
-        let description = stream.get_description();
-        let label = name;
-        if (description && description !== name)
-            label = `${name} - ${description}`;
+        let label = stream.get_name() || stream.get_description() || 'Unknown';
 
         this._label = new St.Label({
             text: label,
@@ -131,7 +146,7 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
             for (let sink of sinks) {
                 if (sink.name === undefined)
                     continue;
-                let sinkLabel = sink.name;
+                let sinkLabel = `${sink.id} - ${sink.name}`;
                 this.menu.addAction(sinkLabel, () => this._moveSinkInput(sink));
             }
         }).catch(e => {
