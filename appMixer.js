@@ -131,7 +131,7 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
             for (let sink of sinks) {
                 if (sink.name === undefined)
                     continue;
-                let sinkLabel = `${sink.id} - ${sink.name}`;
+                let sinkLabel = sink.name;
                 this.menu.addAction(sinkLabel, () => this._moveSinkInput(sink));
             }
         }).catch(e => {

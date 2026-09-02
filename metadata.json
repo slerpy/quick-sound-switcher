@@ -1,6 +1,6 @@
 {
-  "uuid": "quick-sound-switcher@dustin-hawkins",
-  "name": "Quick Sound Switcher",
+  "uuid": "quick-sound-switcher@slerpy",
+  "name": "Quick Sound Switcher-slerpyver",
   "description": "Switch audio output/input devices, change audio profiles, and control per-application volume directly from the Quick Settings panel.",
   "shell-version": [
     "45",
@@ -12,6 +12,6 @@
   ],
   "settings-schema": "org.gnome.shell.extensions.quick-sound-switcher",
   "gettext-domain": "quick-sound-switcher",
-  "url": "https://github.com/dustin-hawkins/quick-sound-switcher",
+  "url": "https://github.com/slerpy/quick-sound-switcher",
   "version": 1
 }
