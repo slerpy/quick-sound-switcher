@@ -7,6 +7,7 @@
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gvc from 'gi://Gvc';
 import St from 'gi://St';
@@ -28,7 +29,7 @@ class AppMixerToggle extends QuickSettings.QuickMenuToggle {
     }
 });
 
-// Some apps (Firefox is why we care) do monocolor and full color icons... hopefully this fixes
+// Strips symbolic icon-name candidates so lookup prefers the full-color icon.
 function preferFullColorIcon(gicon) {
     if (gicon instanceof Gio.ThemedIcon) {
         let names = gicon.get_names().filter(n => !n.includes('-symbolic'));
@@ -38,19 +39,23 @@ function preferFullColorIcon(gicon) {
     return gicon;
 }
 
-// Header row
-
+// Header row: icon + name + expand chevron -> output-device picker.
+// Uses PopupSubMenuMenuItem (a standalone PopupMenu.PopupMenu breaks the
+// QuickSettings modal grab -- don't go back to that).
 const AppOutputSelector = GObject.registerClass(
 class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
-    _init(stream, gettext) {
+    _init(stream, gettext, topMenu) {
         super._init('', true);
         this._destroyed = false;
         this._stream = stream;
         this._ = gettext;
+        this._topMenu = topMenu;
         this._sinkInputIndex = stream.get_index();
+        // Tighten against the slider row below.
         this.style = 'padding-bottom: 2px;';
+
         this.icon.icon_size = 22;
-        // Some apps (Firefox is why we care) color icons
+        // Forces full-color rendering (some apps default to symbolic).
         this.icon.style = '-st-icon-style: regular;';
 
         let gicon = null;
@@ -61,6 +66,7 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
                 if (appInfo)
                     gicon = appInfo.get_icon();
             } catch (e) {
+                // No matching .desktop file -- fall through to icon-name.
             }
         }
         if (gicon) {
@@ -77,11 +83,7 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
         let label = stream.get_name() || stream.get_description() || 'Unknown';
         this.label.text = label;
 
-        // Some apps (Discord's WebRTC engine among them) report an internal
-        // component name instead of the app itself, and not every app sets
-        // application.id for the DesktopAppInfo lookup above. Fall back to
-        // application.process.binary, which more reliably reflects the
-        // actual executable, once it's available.
+        // Fallback icon/label resolution via process.binary (async).
         this._resolveFallbackInfo(this._sinkInputIndex, label);
     }
 
@@ -94,8 +96,7 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
             return;
         let binary = entry.binary;
 
-        // Icon: only try this if the DesktopAppInfo lookup via application.id
-        // already failed and we're still showing the generic fallback icon.
+        // Only needed if the application.id lookup above already failed.
         if (!this._hasRealIcon) {
             try {
                 let appInfo = Gio.DesktopAppInfo.new(`${binary.toLowerCase()}.desktop`);
@@ -107,10 +108,11 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
                     }
                 }
             } catch (e) {
-                // No matching .desktop file for this binary name either —
-                // keep the generic fallback icon already showing.
+                // Keep the generic fallback icon.
             }
         }
+
+        // Discord's WebRTC engine reports itself instead of "Discord".
         if (originalLabel.toLowerCase().includes('webrtc')) {
             let niceName = binary.charAt(0).toUpperCase() + binary.slice(1);
             this.label.text = niceName;
@@ -118,6 +120,7 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
                 this.onLabelChanged(niceName);
         }
 
+        // Firefox-only live tab title, via pw-dump (see portSettings.js).
         if (binary.toLowerCase() === 'firefox') {
             let titles = await Port.getFirefoxLiveTitles();
             if (this._destroyed)
@@ -147,10 +150,16 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
             for (let sink of sinks) {
                 if (sink.name === undefined)
                     continue;
-                let item = new PopupMenu.PopupMenuItem(sink.name);
+                // activate:false stops selection from closing the whole
+                // panel; button-press-event drives the actual click.
+                let item = new PopupMenu.PopupMenuItem(sink.name, {activate: false});
                 if (currentSinkId !== undefined && String(sink.id) === String(currentSinkId))
                     item.setOrnament(PopupMenu.Ornament.CHECK);
-                item.connect('activate', () => this._moveSinkInput(sink));
+                item.reactive = true;
+                item.connect('button-press-event', () => {
+                    this._moveSinkInput(sink);
+                    return Clutter.EVENT_STOP;
+                });
                 this.menu.addMenuItem(item);
             }
         }).catch(e => {
@@ -167,8 +176,19 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
             proc.wait_async(null, (p, res) => {
                 try {
                     p.wait_finish(res);
-                    if (!p.get_successful())
+                    if (p.get_successful()) {
+                        // Small delay: pactl reports success before the
+                        // routing change is actually queryable.
+                        if (!this._destroyed) {
+                            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+                                if (!this._destroyed)
+                                    this.updateSinks();
+                                return GLib.SOURCE_REMOVE;
+                            });
+                        }
+                    } else {
                         console.error(`SDC: pactl move-sink-input exited ${p.get_exit_status()}`);
+                    }
                 } catch (e) {
                     console.error(`SDC: Failed to move sink input: ${e}`);
                 }
@@ -184,8 +204,7 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
     }
 });
 
-// Slider row directly beneath each app's header: mute button + slider +
-// live percentage. 
+// Slider row beneath each app header: mute button + slider + percentage.
 const AppVolumeRow = GObject.registerClass(
 class AppVolumeRow extends PopupMenu.PopupBaseMenuItem {
     _init(stream, gettext, headerItem) {
@@ -194,6 +213,8 @@ class AppVolumeRow extends PopupMenu.PopupBaseMenuItem {
         this._ = gettext;
         this._destroyed = false;
         this._headerItem = headerItem;
+        // Matches the header row's tightened bottom padding, so the two
+        // rows read as one cohesive block.
         this.style = 'padding-top: 2px;';
 
         let sliderBox = new St.BoxLayout({x_expand: true, style: 'spacing: 8px;'});
@@ -239,6 +260,7 @@ class AppVolumeRow extends PopupMenu.PopupBaseMenuItem {
             this._updateMuteIcon();
         });
 
+        // Keep accessible name in sync with async label resolution.
         headerItem.onLabelChanged = newLabel => {
             this._slider.accessible_name = newLabel;
         };
@@ -268,13 +290,11 @@ class AppVolumeRow extends PopupMenu.PopupBaseMenuItem {
 
     _toggleMute() {
         let newMuted = !this._stream.is_muted;
-
         try {
             this._stream.change_is_muted(newMuted);
         } catch (e) {
             this._stream.is_muted = newMuted;
         }
-
         this._updateMuteIcon();
     }
 
@@ -330,8 +350,7 @@ class AppMixerIndicator extends QuickSettings.SystemIndicator {
 
         this._updateVisibility();
 
-        // Refresh output selectors (sink list + current-device checkmark)
-        // every time the menu opens, so they never go stale.
+        // Refresh sink lists + checkmarks every time the menu opens.
         this._menuOpenId = this._toggle.menu.connect('open-state-changed', (_menu, open) => {
             if (open) {
                 Object.values(this._appHeaders).forEach(sel =>
@@ -349,7 +368,7 @@ class AppMixerIndicator extends QuickSettings.SystemIndicator {
             return;
 
         // Header row: icon + name + expand chevron (output picker)
-        let headerItem = new AppOutputSelector(stream, this._);
+        let headerItem = new AppOutputSelector(stream, this._, this._toggle.menu);
         this._toggle.menu.addMenuItem(headerItem);
         this._appHeaders[id] = headerItem;
 
