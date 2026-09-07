@@ -10,6 +10,7 @@ import Gio from 'gi://Gio';
 import GObject from 'gi://GObject';
 import Gvc from 'gi://Gvc';
 import St from 'gi://St';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import * as Slider from 'resource:///org/gnome/shell/ui/slider.js';
@@ -35,6 +36,7 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
         this._stream = stream;
         this._ = gettext;
         this._destroyed = false;
+        this._sinkInputIndex = stream.get_index();
 
         let box = new St.BoxLayout({
             vertical: true,
@@ -42,7 +44,7 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
         });
         this.add_child(box);
 
-        // Header: icon + name + mute button
+        // Header row: icon + name + output (3-dot) button
         let headerBox = new St.BoxLayout({x_expand: true, style: 'spacing: 8px;'});
         box.add_child(headerBox);
 
@@ -85,20 +87,71 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
         });
         headerBox.add_child(this._label);
 
-        // Volume slider
+        // Output (3-dot) button — opens a popup listing every sink, with
+        // the currently-active one checked. Replaces the old always-visible
+        // "Output: <name>" row, and fetches fresh state on every open, so
+        // it never goes stale the way the old label-based approach did.
+        this._outputButton = new St.Button({
+            style_class: 'app-output-menu-button',
+            can_focus: true,
+            child: new St.Icon({
+                icon_name: 'view-more-symbolic',
+                icon_size: 16,
+            }),
+        });
+        headerBox.add_child(this._outputButton);
+
+        this._outputMenu = new PopupMenu.PopupMenu(this._outputButton, 0.5, St.Side.TOP);
+        Main.uiGroup.add_child(this._outputMenu.actor);
+        this._outputMenu.actor.hide();
+
+        this._outputButtonClickedId = this._outputButton.connect('clicked', () => {
+            this._populateOutputMenu();
+            this._outputMenu.toggle();
+        });
+
+        // Slider row: mute button + slider + percentage
+        let sliderBox = new St.BoxLayout({x_expand: true, style: 'spacing: 8px;'});
+        box.add_child(sliderBox);
+
+        this._muteButton = new St.Button({
+            style_class: 'app-mute-button',
+            can_focus: true,
+            child: new St.Icon({
+                icon_name: this._getMuteIconName(),
+                icon_size: 16,
+            }),
+        });
+        sliderBox.add_child(this._muteButton);
+        this._muteButtonClickedId = this._muteButton.connect('clicked', () => {
+            this._toggleMute();
+        });
+
         let vol = stream.volume / this._getMaxVolume();
         this._slider = new Slider.Slider(Math.min(vol, 1.0));
+        this._slider.x_expand = true;
         this._slider.accessible_name = label;
-        box.add_child(this._slider);
+        sliderBox.add_child(this._slider);
+
+        this._percentLabel = new St.Label({
+            text: `${Math.round(Math.min(vol, 1.0) * 100)}%`,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        sliderBox.add_child(this._percentLabel);
 
         this._sliderChangedId = this._slider.connect('notify::value', () => {
             let newVol = this._slider.value * this._getMaxVolume();
             this._stream.volume = newVol;
             this._stream.push_volume();
+            this._percentLabel.text = `${Math.round(this._slider.value * 100)}%`;
         });
 
         this._streamChangedId = this._stream.connect('notify::volume', () => {
             this._updateSlider();
+        });
+
+        this._streamMutedId = this._stream.connect('notify::is-muted', () => {
+            this._updateMuteIcon();
         });
 
         // Some apps (Discord's WebRTC engine among them) report an internal
@@ -174,51 +227,53 @@ class AppStreamSlider extends PopupMenu.PopupBaseMenuItem {
         this._slider.block_signal_handler(this._sliderChangedId);
         this._slider.value = Math.min(vol, 1.0);
         this._slider.unblock_signal_handler(this._sliderChangedId);
+        this._percentLabel.text = `${Math.round(Math.min(vol, 1.0) * 100)}%`;
     }
 
-    destroy() {
-        this._destroyed = true;
-        if (this._sliderChangedId) {
-            this._slider.disconnect(this._sliderChangedId);
-            this._sliderChangedId = null;
+    _getMuteIconName() {
+        return this._stream.is_muted
+            ? 'audio-volume-muted-symbolic'
+            : 'audio-volume-high-symbolic';
+    }
+
+    _updateMuteIcon() {
+        this._muteButton.child.icon_name = this._getMuteIconName();
+    }
+
+    _toggleMute() {
+        let newMuted = !this._stream.is_muted;
+        // change_is_muted() is the canonical Gvc method (used by GNOME
+        // Shell's own volume.js), but fall back to a direct property set
+        // if it's ever unavailable, so muting still works either way.
+        try {
+            this._stream.change_is_muted(newMuted);
+        } catch (e) {
+            this._stream.is_muted = newMuted;
         }
-        if (this._streamChangedId) {
-            this._stream.disconnect(this._streamChangedId);
-            this._streamChangedId = null;
-        }
-        super.destroy();
-    }
-});
-
-const AppOutputSelector = GObject.registerClass(
-class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
-    _init(stream, gettext) {
-        super._init(gettext('Output: Default'), false);
-        this._destroyed = false;
-        this._stream = stream;
-        this._ = gettext;
-        this._sinkInputIndex = stream.get_index();
-
-        this.add_style_class_name('app-output-selector');
-        this.label.add_style_class_name('app-output-label');
+        // change_is_muted() should trigger notify::is-muted on its own,
+        // but update immediately too so the icon never looks unresponsive.
+        this._updateMuteIcon();
     }
 
-    updateSinks() {
+    async _populateOutputMenu() {
+        this._outputMenu.removeAll();
+        let [sinks, info] = await Promise.all([
+            Port.getSinks(),
+            Port.getSinkInputInfo(),
+        ]);
         if (this._destroyed)
             return;
-        this.menu.removeAll();
-        Port.getSinks().then(sinks => {
-            if (this._destroyed)
-                return;
-            for (let sink of sinks) {
-                if (sink.name === undefined)
-                    continue;
-                let sinkLabel = sink.name;
-                this.menu.addAction(sinkLabel, () => this._moveSinkInput(sink));
-            }
-        }).catch(e => {
-            console.error(`SDC: Failed to load sinks: ${e}`);
-        });
+        let entry = info[String(this._sinkInputIndex)];
+        let currentSinkId = entry ? entry.sinkId : undefined;
+        for (let sink of sinks) {
+            if (sink.name === undefined)
+                continue;
+            let item = new PopupMenu.PopupMenuItem(sink.name);
+            if (currentSinkId !== undefined && String(sink.id) === String(currentSinkId))
+                item.setOrnament(PopupMenu.Ornament.CHECK);
+            item.connect('activate', () => this._moveSinkInput(sink));
+            this._outputMenu.addMenuItem(item);
+        }
     }
 
     _moveSinkInput(sink) {
@@ -230,11 +285,7 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
             proc.wait_async(null, (p, res) => {
                 try {
                     p.wait_finish(res);
-                    if (this._destroyed)
-                        return;
-                    if (p.get_successful())
-                        this.label.text = `${this._('Output')}: ${sink.name}`;
-                    else
+                    if (!p.get_successful())
                         console.error(`SDC: pactl move-sink-input exited ${p.get_exit_status()}`);
                 } catch (e) {
                     console.error(`SDC: Failed to move sink input: ${e}`);
@@ -247,6 +298,30 @@ class AppOutputSelector extends PopupMenu.PopupSubMenuMenuItem {
 
     destroy() {
         this._destroyed = true;
+        if (this._sliderChangedId) {
+            this._slider.disconnect(this._sliderChangedId);
+            this._sliderChangedId = null;
+        }
+        if (this._streamChangedId) {
+            this._stream.disconnect(this._streamChangedId);
+            this._streamChangedId = null;
+        }
+        if (this._streamMutedId) {
+            this._stream.disconnect(this._streamMutedId);
+            this._streamMutedId = null;
+        }
+        if (this._outputButtonClickedId) {
+            this._outputButton.disconnect(this._outputButtonClickedId);
+            this._outputButtonClickedId = null;
+        }
+        if (this._muteButtonClickedId) {
+            this._muteButton.disconnect(this._muteButtonClickedId);
+            this._muteButtonClickedId = null;
+        }
+        if (this._outputMenu) {
+            this._outputMenu.destroy();
+            this._outputMenu = null;
+        }
         super.destroy();
     }
 });
@@ -266,7 +341,6 @@ class AppMixerIndicator extends QuickSettings.SystemIndicator {
 
         this._control = Volume.getMixerControl();
         this._appStreams = {};
-        this._appOutputSelectors = {};
 
         this._streamAddedId = this._control.connect('stream-added',
             this._streamAdded.bind(this));
@@ -278,14 +352,6 @@ class AppMixerIndicator extends QuickSettings.SystemIndicator {
             this._streamAdded(this._control, stream.get_id());
 
         this._updateVisibility();
-
-        // Refresh output selectors when menu opens
-        this._menuOpenId = this._toggle.menu.connect('open-state-changed', (_menu, open) => {
-            if (open) {
-                Object.values(this._appOutputSelectors).forEach(sel =>
-                    sel.updateSinks());
-            }
-        });
     }
 
     _streamAdded(control, id) {
@@ -296,15 +362,10 @@ class AppMixerIndicator extends QuickSettings.SystemIndicator {
         if (!stream || stream.is_event_stream || !(stream instanceof Gvc.MixerSinkInput))
             return;
 
-        // Volume slider
+        // Volume slider + output routing, combined into a single item
         let sliderItem = new AppStreamSlider(stream, this._);
         this._toggle.menu.addMenuItem(sliderItem);
         this._appStreams[id] = sliderItem;
-
-        // Output selector
-        let outputSelector = new AppOutputSelector(stream, this._);
-        this._toggle.menu.addMenuItem(outputSelector);
-        this._appOutputSelectors[id] = outputSelector;
 
         // Separator
         let separator = new PopupMenu.PopupSeparatorMenuItem();
@@ -323,10 +384,6 @@ class AppMixerIndicator extends QuickSettings.SystemIndicator {
             sliderItem.destroy();
             delete this._appStreams[id];
         }
-        if (id in this._appOutputSelectors) {
-            this._appOutputSelectors[id].destroy();
-            delete this._appOutputSelectors[id];
-        }
         this._updateVisibility();
     }
 
@@ -335,10 +392,6 @@ class AppMixerIndicator extends QuickSettings.SystemIndicator {
     }
 
     destroy() {
-        if (this._menuOpenId) {
-            this._toggle.menu.disconnect(this._menuOpenId);
-            this._menuOpenId = null;
-        }
         if (this._streamAddedId) {
             this._control.disconnect(this._streamAddedId);
             this._streamAddedId = null;
@@ -355,11 +408,6 @@ class AppMixerIndicator extends QuickSettings.SystemIndicator {
             item.destroy();
         });
         this._appStreams = {};
-
-        Object.keys(this._appOutputSelectors).forEach(id => {
-            this._appOutputSelectors[id].destroy();
-        });
-        this._appOutputSelectors = {};
 
         this._toggle?.destroy();
         super.destroy();

@@ -185,14 +185,21 @@ export async function getSinks() {
     }
 }
 
-// Looks up application.process.binary for every current sink-input, keyed
-// by sink-input index (the same index Gvc.MixerStream.get_index() and
-// pw-dump's object.serial both use — see getFirefoxLiveTitles() below).
+// Looks up application.process.binary and the current sink id (the
+// "Sink: N" field) for every current sink-input, keyed by sink-input
+// index (the same index Gvc.MixerStream.get_index() and pw-dump's
+// object.serial both use — see getFirefoxLiveTitles() below).
 //
-// Used as a more reliable identity source than a stream's own
+// binary is used as a more reliable identity source than a stream's own
 // self-reported name/icon — some apps (Discord's WebRTC engine, for
 // example) report an internal component name instead of the app itself,
 // while process.binary consistently reflects the actual executable.
+//
+// sinkId reflects the stream's actual *current* output device, queried
+// fresh every time — this replaces the old approach of only updating a
+// label when the user moved a stream through this extension's own menu,
+// which went stale/wrong for anything routed another way (a fresh login,
+// a different tool, PulseAudio's own stream-restore).
 export async function getSinkInputInfo() {
     try {
         let stdout = await _spawnAsync(['pactl', 'list', 'sink-inputs']);
@@ -203,8 +210,10 @@ export async function getSinkInputInfo() {
             if (!idMatch)
                 continue;
             let binMatch = /\n\t\tapplication\.process\.binary = "(.*?)"/.exec(block);
+            let sinkMatch = /\n\tSink:\s(\d+)/.exec(block);
             info[idMatch[1]] = {
                 binary: binMatch ? binMatch[1] : undefined,
+                sinkId: sinkMatch ? sinkMatch[1] : undefined,
             };
         }
         return info;
